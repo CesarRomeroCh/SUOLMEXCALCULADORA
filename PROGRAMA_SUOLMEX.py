@@ -167,7 +167,7 @@ with st.sidebar:
     st.markdown("### Instrucciones")
     st.markdown("""
     1. Sube tu Excel de programación con hojas B1-B4.
-    2. Revisa el pedido extraído.
+    2. Revisa el pedido extraído o ingrésalo manualmente.
     3. Genera el pedido consolidado y descarga el PDF.
     """)
     debug_prog = st.checkbox("Mostrar debug de programación")
@@ -201,7 +201,7 @@ def cargar_sesion():
     except:
         st.session_state.logueado = False
 
-# db
+# base de datos
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 c.execute("""
@@ -217,7 +217,7 @@ conn.commit()
 def encriptar_contra(contra):
     return hashlib.sha256(contra.encode()).hexdigest()
 
-# admin default
+# admin por defecto
 if not c.execute("SELECT * FROM usuarios WHERE codigo = 'admin'").fetchone():
     c.execute("INSERT INTO usuarios (codigo, contrasena, rol) VALUES (?, ?, ?)",
               ('admin', encriptar_contra('admin123'), 'admin'))
@@ -253,11 +253,12 @@ if st.button("Cerrar sesión"):
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     st.success("Sesión cerrada.")
-    st.experimental_set_query_params()  # forzar reevaluación mínima
+    # pequeño truco para refrescar: cambiar un parámetro en la URL
+    st.experimental_set_query_params(_r=str(uuid.uuid4()))
 
 st.success(f"Sesión iniciada como **{st.session_state.usuario}** ({st.session_state.rol})")
 
-# historial
+# historial de PDFs
 with st.expander("Historial de pedidos generados"):
     folder = Path("historial_pedidos")
     if folder.exists():
@@ -277,8 +278,8 @@ with st.expander("Historial de pedidos generados"):
     else:
         st.info("No se ha generado ningún pedido aún.")
 
-# gestión usuarios (admin)
-if st.session_state.rol == "admin":
+# gestión de usuarios (admin)
+if st.session_state.get("rol") == "admin":
     st.markdown("---")
     st.subheader("Gestión de Usuarios")
     with st.expander("Crear nuevo usuario"):
@@ -331,150 +332,152 @@ def cargar_fichas(mtime: float):
     df["__Corrida_clean"] = df["Corrida"].apply(clean_key)
     return df.dropna(subset=["Peso/Pie", "Relacion Poliol:ISO"])
 
-# controlar recarga sin usar experimental_rerun
+# gestionar recarga de fichas sin experimental_rerun
 if recargar:
     st.session_state["fichas_reload_flag"] = not st.session_state.get("fichas_reload_flag", False)
 
 mtime = os.path.getmtime(FICHAS_PATH) if os.path.exists(FICHAS_PATH) else 0
-# Si cambió el flag, invalida el cache automáticamente por dependencia
 fichas = cargar_fichas(mtime)
 
 if debug_fichas:
     st.subheader("Debug: fichas cargadas (muestra)")
     st.dataframe(fichas[["Codigo del Producto", "Linea", "Corrida", "__Linea_clean", "__Corrida_clean"]].drop_duplicates().head(100))
 
-# estado inicial
+# estado
 if "pedido_total" not in st.session_state:
     st.session_state["pedido_total"] = []
 if "corrida_seleccionada" not in st.session_state:
     st.session_state["corrida_seleccionada"] = None
 
+# layout con pestañas
 st.markdown("---")
 st.title("Generador de Pedido SUOLMEX (B1–B4 consolidado)")
+tab_excel, tab_manual = st.tabs(["Desde Excel", "Manual"])
 
-# uploader
-uploaded_prog = st.file_uploader("Sube tu Excel de programación", type=["xlsx"], key="prog_excel")
-codigo_producto_override = st.text_input("Código del Producto (override si no lo detecta)", value="")
+# === pestaña Excel ===
+with tab_excel:
+    uploaded_prog = st.file_uploader("Sube tu Excel de programación", type=["xlsx"], key="prog_excel_tab")
+    codigo_producto_override = st.text_input("Código del Producto (override si no lo detecta)", value="", key="override_excel")
 
-pedido_programado = pd.DataFrame()
-if uploaded_prog:
-    st.info("Interpretando archivo de programación...")
-    t0 = time.time()
-    pedido_programado = extract_programacion_estatica_B1_B4(
-        uploaded_prog,
-        codigo_producto_override or None,
-        hojas_objetivo=["B1", "B2", "B3", "B4"],
-        debug=debug_prog
-    )
-    st.write(f"Tiempo de parseo: {time.time() - t0:.3f}s")
+    pedido_programado = pd.DataFrame()
+    if uploaded_prog:
+        st.info("Interpretando archivo de programación...")
+        t0 = time.time()
+        pedido_programado = extract_programacion_estatica_B1_B4(
+            uploaded_prog,
+            codigo_producto_override or None,
+            hojas_objetivo=["B1", "B2", "B3", "B4"],
+            debug=debug_prog
+        )
+        st.write(f"Tiempo de parseo: {time.time() - t0:.3f}s")
 
-    st.subheader("Pedido extraído (debug)")
-    st.dataframe(pedido_programado)
+        st.subheader("Pedido extraído (debug)")
+        st.dataframe(pedido_programado)
 
-    if pedido_programado.empty:
-        st.warning("No se extrajeron líneas válidas de las hojas objetivo. Verifica el archivo y la nomenclatura de hojas.")
-    else:
-        for _, row in pedido_programado.iterrows():
-            codigo = str(row["Código del Producto"]).strip()
-            modelo = str(row["Modelo"]).strip().upper()
-            corrida = str(row["Talla"]).strip()
-            try:
-                cantidad = int(float(row["Cantidad pares"]))
-            except:
-                continue
-            if cantidad <= 0:
-                continue
-
-            modelo_norm = clean_key(modelo)
-            corrida_norm = clean_key(corrida)
-
-            ficha = fichas[
-                (fichas["Codigo del Producto"].astype(str).str.strip() == codigo) &
-                (fichas["__Linea_clean"] == modelo_norm) &
-                (fichas["__Corrida_clean"] == corrida_norm)
-            ]
-            if not ficha.empty:
-                ficha = ficha.iloc[0]
-                peso_total = ficha['Peso/Pie'] * cantidad * 2
+        if pedido_programado.empty:
+            st.warning("No se extrajeron líneas válidas de las hojas objetivo. Verifica el archivo y la nomenclatura de hojas.")
+        else:
+            for _, row in pedido_programado.iterrows():
+                codigo = str(row["Código del Producto"]).strip()
+                modelo = str(row["Modelo"]).strip().upper()
+                corrida = str(row["Talla"]).strip()
                 try:
-                    poliol_str, iso_str = ficha['Relacion Poliol:ISO'].split(":")
-                    poliol = float(poliol_str)
-                    iso = float(iso_str)
+                    cantidad = int(float(row["Cantidad pares"]))
                 except:
-                    poliol, iso = 0.0, 0.0
-                total_partes = (poliol + iso) if (poliol + iso) != 0 else 1
-                cantidad_poliol = peso_total * (poliol / total_partes)
-                cantidad_iso = peso_total * (iso / total_partes)
+                    continue
+                if cantidad <= 0:
+                    continue
 
-                nuevo = {
-                    "Código": codigo,
-                    "Modelo": modelo,
-                    "Talla": corrida,
-                    "Cantidad pares": cantidad,
-                    "Peso Total (g)": peso_total,
-                    "Poliol (g)": cantidad_poliol,
-                    "ISO (g)": cantidad_iso,
-                    "Hoja": ficha['Hoja']
-                }
-                if nuevo not in st.session_state["pedido_total"]:
-                    st.session_state["pedido_total"].append(nuevo)
-            else:
-                st.warning(f"No se encontró ficha para código='{codigo}', modelo='{modelo}', talla='{corrida}'.")
+                modelo_norm = clean_key(modelo)
+                corrida_norm = clean_key(corrida)
 
-        st.success("Explosión automática agregada al pedido.")
+                ficha = fichas[
+                    (fichas["Codigo del Producto"].astype(str).str.strip() == codigo) &
+                    (fichas["__Linea_clean"] == modelo_norm) &
+                    (fichas["__Corrida_clean"] == corrida_norm)
+                ]
+                if not ficha.empty:
+                    ficha = ficha.iloc[0]
+                    peso_total = ficha['Peso/Pie'] * cantidad * 2
+                    try:
+                        poliol_str, iso_str = ficha['Relacion Poliol:ISO'].split(":")
+                        poliol = float(poliol_str)
+                        iso = float(iso_str)
+                    except:
+                        poliol, iso = 0.0, 0.0
+                    total_partes = (poliol + iso) if (poliol + iso) != 0 else 1
+                    cantidad_poliol = peso_total * (poliol / total_partes)
+                    cantidad_iso = peso_total * (iso / total_partes)
 
-# ingreso manual
-st.markdown("---")
-st.subheader("Ingreso manual")
-codigo_manual = st.selectbox("Código del Producto:", sorted(fichas["Codigo del Producto"].unique()))
-modelos = fichas[fichas["Codigo del Producto"] == codigo_manual]["Linea"].unique()
-modelo_manual = st.selectbox("Modelo:", sorted(modelos))
-cantidad = st.number_input("Cantidad de pares:", min_value=1, step=1)
-corridas = fichas[
-    (fichas["Codigo del Producto"] == codigo_manual) &
-    (fichas["Linea"] == modelo_manual)
-]["Corrida"].unique()
-st.markdown("#### Selecciona una talla:")
-cols = st.columns(min(5, len(corridas)))
-for i, talla in enumerate(sorted(corridas)):
-    if cols[i % 5].button(talla):
-        st.session_state["corrida_seleccionada"] = talla
+                    nuevo = {
+                        "Código": codigo,
+                        "Modelo": modelo,
+                        "Talla": corrida,
+                        "Cantidad pares": cantidad,
+                        "Peso Total (g)": peso_total,
+                        "Poliol (g)": cantidad_poliol,
+                        "ISO (g)": cantidad_iso,
+                        "Hoja": ficha['Hoja']
+                    }
+                    if nuevo not in st.session_state["pedido_total"]:
+                        st.session_state["pedido_total"].append(nuevo)
+                else:
+                    st.warning(f"No se encontró ficha para código='{codigo}', modelo='{modelo}', talla='{corrida}'.")
 
-if st.session_state["corrida_seleccionada"]:
-    corrida = st.session_state["corrida_seleccionada"]
-    ficha_manual = fichas[
+            st.success("Explosión automática agregada al pedido.")
+
+# === pestaña Manual ===
+with tab_manual:
+    st.subheader("Ingreso manual")
+    codigo_manual = st.selectbox("Código del Producto:", sorted(fichas["Codigo del Producto"].unique()), key="manual_codigo")
+    modelos = fichas[fichas["Codigo del Producto"] == codigo_manual]["Linea"].unique()
+    modelo_manual = st.selectbox("Modelo:", sorted(modelos), key="manual_modelo")
+    cantidad = st.number_input("Cantidad de pares:", min_value=1, step=1, key="manual_cantidad")
+    corridas = fichas[
         (fichas["Codigo del Producto"] == codigo_manual) &
-        (fichas["Linea"] == modelo_manual) &
-        (fichas["Corrida"] == corrida)
-    ]
-    if not ficha_manual.empty:
-        ficha_manual = ficha_manual.iloc[0]
-        peso_total = ficha_manual['Peso/Pie'] * cantidad * 2
-        try:
-            poliol_str, iso_str = ficha_manual['Relacion Poliol:ISO'].split(":")
-            poliol = float(poliol_str)
-            iso = float(iso_str)
-        except:
-            poliol, iso = 0.0, 0.0
-        total_partes = (poliol + iso) if (poliol + iso) != 0 else 1
-        cantidad_poliol = peso_total * (poliol / total_partes)
-        cantidad_iso = peso_total * (iso / total_partes)
-        nuevo = {
-            "Código": codigo_manual,
-            "Modelo": modelo_manual,
-            "Talla": corrida,
-            "Cantidad pares": cantidad,
-            "Peso Total (g)": peso_total,
-            "Poliol (g)": cantidad_poliol,
-            "ISO (g)": cantidad_iso,
-            "Hoja": ficha_manual['Hoja']
-        }
-        if nuevo not in st.session_state["pedido_total"]:
-            st.session_state["pedido_total"].append(nuevo)
-        st.success(f"Agregado: {modelo_manual} - Talla {corrida} - {cantidad} pares.")
-        st.session_state["corrida_seleccionada"] = None
+        (fichas["Linea"] == modelo_manual)
+    ]["Corrida"].unique()
+    st.markdown("#### Selecciona una talla:")
+    cols = st.columns(min(5, len(corridas)))
+    for i, talla in enumerate(sorted(corridas)):
+        if cols[i % 5].button(talla, key=f"manual_talla_{i}"):
+            st.session_state["corrida_seleccionada"] = talla
 
-# resumen pedido
+    if st.session_state.get("corrida_seleccionada"):
+        corrida = st.session_state["corrida_seleccionada"]
+        ficha_manual = fichas[
+            (fichas["Codigo del Producto"] == codigo_manual) &
+            (fichas["Linea"] == modelo_manual) &
+            (fichas["Corrida"] == corrida)
+        ]
+        if not ficha_manual.empty:
+            ficha_manual = ficha_manual.iloc[0]
+            peso_total = ficha_manual['Peso/Pie'] * cantidad * 2
+            try:
+                poliol_str, iso_str = ficha_manual['Relacion Poliol:ISO'].split(":")
+                poliol = float(poliol_str)
+                iso = float(iso_str)
+            except:
+                poliol, iso = 0.0, 0.0
+            total_partes = (poliol + iso) if (poliol + iso) != 0 else 1
+            cantidad_poliol = peso_total * (poliol / total_partes)
+            cantidad_iso = peso_total * (iso / total_partes)
+            nuevo = {
+                "Código": codigo_manual,
+                "Modelo": modelo_manual,
+                "Talla": corrida,
+                "Cantidad pares": cantidad,
+                "Peso Total (g)": peso_total,
+                "Poliol (g)": cantidad_poliol,
+                "ISO (g)": cantidad_iso,
+                "Hoja": ficha_manual['Hoja']
+            }
+            if nuevo not in st.session_state["pedido_total"]:
+                st.session_state["pedido_total"].append(nuevo)
+            st.success(f"Agregado: {modelo_manual} - Talla {corrida} - {cantidad} pares.")
+            st.session_state["corrida_seleccionada"] = None
+
+# resumen del pedido
 if st.session_state["pedido_total"]:
     st.markdown("---")
     st.subheader("Resumen del Pedido")
@@ -563,8 +566,9 @@ if st.session_state["pedido_total"]:
             st.success(f"PDF generado: {Path(nombre_archivo).name}")
 
             with open(nombre_archivo, "rb") as f:
-                st.download_button("Descargar PDF", data=f, file_name=Path(nombre_archivo).name)
+                st.download_button("📥 Descargar PDF", data=f, file_name=Path(nombre_archivo).name)
     with col2:
         if st.button("Reiniciar Pedido"):
             st.session_state["pedido_total"] = []
             st.success("Pedido reiniciado.")
+
