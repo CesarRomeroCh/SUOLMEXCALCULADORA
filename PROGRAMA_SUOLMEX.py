@@ -54,21 +54,27 @@ FICHAS_HOJAS = ['6001', '2066', '2060', '4098', 'PLANTILLAS']
 
 # ===================== Utilidades Generales =====================
 def clean_key(s):
-if pd.isna(s):
-return ""
-@@ -20,54 +53,114 @@ def clean_key(s):
-s = "".join(ch for ch in s if not unicodedata.combining(ch))
-return " ".join(s.split())
+    if pd.isna(s):
+        return ""
+    
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(s.split())
+
 
 _num_pat = re.compile(r"[-+]?\d*\.?\d+")
 
+
 def es_numero_valido(s: str) -> bool:
-if s is None:
-return False
-s = str(s).strip()
-if s.upper() in ["", "0"]:
-return False
-    return bool(re.fullmatch(r"[-+]?\d*\.?\d+", s))
+    if s is None:
+        return False
+
+    s = str(s).strip()
+
+    if s.upper() in ["", "0"]:
+        return False
+
     return bool(_num_pat.fullmatch(s))
 
 # Formateadores comunes
